@@ -70,7 +70,7 @@ pub struct FuzzyTermQuery {
     prefix: bool,
     /// If true, only the term with a levenshtein of exactly `distance` will match.
     /// If false, terms at a distance `<=` to `distance` will match.
-    exact_distance: bool
+    exact_distance: bool,
 }
 
 impl FuzzyTermQuery {
@@ -81,7 +81,7 @@ impl FuzzyTermQuery {
             distance,
             transposition_cost_one,
             prefix: false,
-            exact_distance: false
+            exact_distance: false,
         }
     }
 
@@ -93,7 +93,7 @@ impl FuzzyTermQuery {
             distance,
             transposition_cost_one,
             prefix: false,
-            exact_distance: true
+            exact_distance: true,
         }
     }
 
@@ -104,7 +104,7 @@ impl FuzzyTermQuery {
             distance,
             transposition_cost_one,
             prefix: true,
-            exact_distance: false
+            exact_distance: false,
         }
     }
 }
@@ -112,36 +112,41 @@ impl FuzzyTermQuery {
 impl Query for FuzzyTermQuery {
     fn weight(&self, _searcher: &Searcher, _scoring_enabled: bool) -> Result<Box<dyn Weight>> {
         // LEV_BUILDER is a HashMap, whose `get` method returns an Option
-        match LEV_BUILDER.get(&(self.distance, false)) {
-            // Unwrap the option and build the Ok(AutomatonWeight)
-            Some(automaton_builder) => {
-                let dfa = automaton_builder.build_dfa(self.term.text());
-                let target_distance = self.distance;
-                if self.exact_distance {
-                    let wrapped_dfa = WrappedDFA {
-                        dfa,
-                        condition: move |distance: Distance| {
-                            distance == Distance::Exact(target_distance)
-                        }
-                    };
-                    Ok(Box::new(AutomatonWeight::new(self.term.field(), wrapped_dfa)))
-                } else {
-                    let wrapped_dfa = WrappedDFA {
-                        dfa,
-                        condition: move |distance: Distance| {
-                            match distance {
-                                Distance::Exact(_) => true,
-                                Distance::AtLeast(_) => false,
-                            }
-                        }
-                    };
-                    Ok(Box::new(AutomatonWeight::new(self.term.field(), wrapped_dfa)))
-                }
-            }
-            None => Err(InvalidArgument(format!(
-                "Levenshtein distance of {} is not allowed. Choose a value in the {:?} range",
-                self.distance, VALID_LEVENSHTEIN_DISTANCE_RANGE
-            ))),
+        let automaton_builder = LEV_BUILDER
+            .get(&(self.distance, self.transposition_cost_one))
+            .ok_or_else(|| {
+                InvalidArgument(format!(
+                    "Levenshtein distance of {} is not allowed. Choose a value in the {:?} range",
+                    self.distance, VALID_LEVENSHTEIN_DISTANCE_RANGE
+                ))
+            })?;
+        let dfa = if self.prefix {
+            automaton_builder.build_prefix_dfa(self.term.text())
+        } else {
+            automaton_builder.build_dfa(self.term.text())
+        };
+        let target_distance = self.distance;
+        if self.exact_distance {
+            let wrapped_dfa = WrappedDFA {
+                dfa,
+                condition: move |distance: Distance| distance == Distance::Exact(target_distance),
+            };
+            Ok(Box::new(AutomatonWeight::new(
+                self.term.field(),
+                wrapped_dfa,
+            )))
+        } else {
+            let wrapped_dfa = WrappedDFA {
+                dfa,
+                condition: move |distance: Distance| match distance {
+                    Distance::Exact(_) => true,
+                    Distance::AtLeast(_) => false,
+                },
+            };
+            Ok(Box::new(AutomatonWeight::new(
+                self.term.field(),
+                wrapped_dfa,
+            )))
         }
     }
 }
@@ -176,7 +181,6 @@ mod test {
         let searcher = reader.searcher();
         {
             let term = Term::from_field_text(country_field, "japon");
-
             let fuzzy_query = FuzzyTermQuery::new(term, 1, true);
             let top_docs = searcher
                 .search(&fuzzy_query, &TopDocs::with_limit(2))
@@ -185,5 +189,46 @@ mod test {
             let (score, _) = top_docs[0];
             assert_nearly_equals(1f32, score);
         }
+        {
+            let term = Term::from_field_text(country_field, "japon");
+            let fuzzy_query = FuzzyTermQuery::new_exact(term, 2, false);
+            let top_docs = searcher
+                .search(&fuzzy_query, &TopDocs::with_limit(2))
+                .unwrap();
+            assert!(top_docs.is_empty());
+        }
+        {
+            let term = Term::from_field_text(country_field, "japon");
+            let fuzzy_query = FuzzyTermQuery::new_exact(term, 1, false);
+            let top_docs = searcher
+                .search(&fuzzy_query, &TopDocs::with_limit(2))
+                .unwrap();
+            assert_eq!(top_docs.len(), 1);
+        }
+        {
+            let term = Term::from_field_text(country_field, "jpp");
+            let fuzzy_query = FuzzyTermQuery::new_prefix(term, 1, false);
+            let top_docs = searcher
+                .search(&fuzzy_query, &TopDocs::with_limit(2))
+                .unwrap();
+            assert_eq!(top_docs.len(), 1);
+        }
+        {
+            let term = Term::from_field_text(country_field, "jpaan");
+            let fuzzy_query = FuzzyTermQuery::new_exact(term, 1, true);
+            let top_docs = searcher
+                .search(&fuzzy_query, &TopDocs::with_limit(2))
+                .unwrap();
+            assert_eq!(top_docs.len(), 1);
+        }
+        {
+            let term = Term::from_field_text(country_field, "jpaan");
+            let fuzzy_query = FuzzyTermQuery::new_exact(term, 2, false);
+            let top_docs = searcher
+                .search(&fuzzy_query, &TopDocs::with_limit(2))
+                .unwrap();
+            assert_eq!(top_docs.len(), 1);
+        }
     }
+
 }
